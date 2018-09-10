@@ -1,75 +1,85 @@
-import merge from 'deepmerge';
-import * as shvl from 'shvl';
+import merge from 'deepmerge'
+import * as shvl from 'shvl'
 
-export default function(options, storage, key) {
-  options = options || {};
-  storage = options.storage || (window && window.localStorage);
-  key = options.key || 'vuex';
-
-  function canWriteStorage(storage) {
-    try {
-      storage.setItem('@@', 1);
-      storage.removeItem('@@');
-      return true;
-    } catch (e) {}
-
-    return false;
+export function mergeState(
+  next,
+  options = { arrayMerge: (stored, saved) => saved }
+) {
+  return function(mutation, state, store) {
+    return !mutation
+      ? merge(state, next(mutation, state, store) || {}, options)
+      : next(mutation, state, store)
   }
+}
 
-  function getState(key, storage, value) {
-    try {
-      return (value = storage.getItem(key)) && typeof value !== 'undefined'
-        ? JSON.parse(value)
-        : undefined;
-    } catch (err) {}
-
-    return undefined;
+export function partialState(next, paths = []) {
+  return function(mutation, state, store) {
+    return next(
+      mutation,
+      paths.length > 0
+        ? paths.reduce(
+            (substate, path) => shvl.set(substate, path, shvl.get(state, path)),
+            {}
+          )
+        : state,
+      store
+    )
   }
+}
 
-  function filter() {
-    return true;
+/**
+ * Stringifies and parsed the state to / from JSON. Whenever it encounters
+ * an error in the passed JSON string, it will just return null.
+ */
+
+export function stringifyState(next) {
+  return function(mutation, state, store) {
+    let value = next(mutation, JSON.stringify(state), store)
+
+    return (v => {
+      try {
+        return JSON.parse(v)
+      } catch (e) {
+        return null
+      }
+    })(value)
   }
+}
 
-  function setState(key, state, storage) {
-    return storage.setItem(key, JSON.stringify(state));
+export function fromStorage({
+  key = 'vuex',
+  storage = window && window.localStorage,
+}) {
+  return function(mutation, state, store) {
+    return !mutation
+      ? storage.getItem(key)
+      : (storage.setItem(key, state), storage.getItem(key))
   }
+}
 
-  function reducer(state, paths) {
-    return paths.length === 0
-      ? state
-      : paths.reduce(function(substate, path) {
-          return shvl.set(substate, path, shvl.get(state, path));
-        }, {});
-  }
+/**
+ * This method just returns the store's current state and will be used
+ * as the default middleware so nothing happens actually.
+ */
 
-  function subscriber(store) {
-    return function(handler) {
-      return store.subscribe(handler);
-    };
-  }
+function noop(mutation, state, store) {
+  return state
+}
 
-  if (!canWriteStorage(storage)) {
-    throw new Error('Invalid storage instance given');
-  }
-
+export function persistedState(next = noop) {
   return function(store) {
-    const savedState = shvl.get(options, 'getState', getState)(key, storage);
+    // Rehydrate the store's state when bootstrapping.
+    // @see https://vuex.vuejs.org/api/#replacestate
+    store.replaceState(next(undefined, store.state, store))
 
-    if (typeof savedState === 'object' && savedState !== null) {
-      store.replaceState(merge(store.state, savedState, {
-        arrayMerge: options.arrayMerger || function (store, saved) { return saved },
-        clone: false,
-      }));
+    // The method invokes the composed middleware chain, but doesn't set
+    // the state back to Vuex's store. This way we allow middleware to
+    // persist or modify when it's rehydrated later.
+    function subscribe(mutation, state) {
+      next(mutation, state, store)
     }
 
-    (options.subscriber || subscriber)(store)(function(mutation, state) {
-      if ((options.filter || filter)(mutation)) {
-        (options.setState || setState)(
-          key,
-          (options.reducer || reducer)(state, options.paths || []),
-          storage
-        );
-      }
-    });
-  };
-};
+    // Attach our subscriber to the store.
+    store.subscribe(subscribe)
+  }
+}
